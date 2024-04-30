@@ -11,7 +11,6 @@ import sqlite3
 import os
 import base64
 import mimetypes
-from PIL import Image
 
 
 __version__ = "1.0.0"
@@ -81,7 +80,7 @@ def serve_count_image(key):
 for img in os.listdir(tubes_path):
     img_path = os.path.join(tubes_path, img)
     name = os.path.splitext(img)[0]
-    width, height = Image.open(img_path).size
+    width, height = 88, 255
 
     tubes[name] = {
         "width": width,
