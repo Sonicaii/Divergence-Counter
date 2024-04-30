@@ -21,10 +21,9 @@ tubes_path = os.path.join(os.path.dirname(__file__), "tubes")
 tubes = {}
 
 def convert_to_datauri(path):
-    mime = mimetypes.guess_type(path)[0]
     with open(path, "rb") as file:
         base64_data = base64.b64encode(file.read()).decode("utf-8")
-    return f"data:{mime};base64,{base64_data}"
+    return f"data:webp;base64,{base64_data}"
 
 def get_count_image(count, length=7, border_radius=15):
     count_array = str(count).zfill(length)
