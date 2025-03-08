@@ -70,7 +70,8 @@ def serve_count_image(key):
     svg = get_count_image(count)
     headers = {
         'Content-Type': 'image/svg+xml',
-        'Cache-Control': 'max-age=0, no-cache, no-store, must-revalidate'
+        'Cache-Control': 'max-age=0, no-cache, no-store, must-revalidate',
+        'Content-Length': str(len(svg.encode('utf-8')))
     }
     return Response(svg, headers=headers)
 
