@@ -1,7 +1,7 @@
 """Divergence View Renderer Server
 
 @author: Sonicaii
-@version: 0.1.0
+@version: 0.1.1
 """
 
 import bpy
@@ -9,7 +9,7 @@ import os
 import logging
 from pathlib import Path
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -40,8 +40,6 @@ class Renderer:
             for mat in bpy.data.materials:
                 self.logger.warning(f"  - {mat.name}")
             raise ValueError("Materials not found.")
-
-        self.turn_off_dots()
 
         # Set up tubes mesh lookup, navigating through object structure
         self._tubes = []
@@ -118,17 +116,6 @@ class Renderer:
                         self.logger.debug(f"Set {mesh_obj.name} (digit {current_digit}) to OFF")
             except ValueError:
                 self.logger.debug(f"Could not parse digit from {filament.name}")
-
-    def turn_off_dots(self):
-        self.logger.debug("Turning off all dot indicators")
-
-        for obj in bpy.data.objects:
-            if "numDot" in obj.name and obj.type == "EMPTY":
-                dot_meshes = [child for child in obj.children if child.type == "MESH"]
-                for mesh in dot_meshes:
-                    if len(mesh.material_slots) > 0:
-                        mesh.material_slots[0].material = self.off_mat
-                        self.logger.debug(f"Set {mesh.name} (dot) to OFF")
 
     def render_frame(self, frame=1, output_dir="./blender/output", filename="nixie_render"):
         Path(output_dir).mkdir(parents=True, exist_ok=True)
