@@ -1,16 +1,18 @@
 """Divergence View Renderer Server
 
 @author: Sonicaii
-@version: 0.1.1
+@version: 0.1.2
 """
 
 import bpy
 import os
 import logging
 from pathlib import Path
+from dotenv import load_dotenv
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 
+load_dotenv()
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(name)s] [%(levelname)s] %(message)s",
@@ -21,6 +23,8 @@ logging.basicConfig(
 logger = logging.getLogger("render")
 
 DIGITS = 8
+SAMPLES = int(os.environ.get("RENDER_SAMPLES", 4096))
+DEVICE_TYPE = os.environ.get("RENDER_DEVICE_TYPE")
 
 
 class Renderer:
@@ -63,6 +67,24 @@ class Renderer:
 
             self._tubes.append(meshes)
 
+        # Blender settings
+        bpy.context.scene.render.engine = "CYCLES"
+
+        # Enable GPU rendering
+        if DEVICE_TYPE is not None:
+            bpy.context.preferences.addons["cycles"].preferences.compute_device_type = DEVICE_TYPE
+
+            bpy.context.preferences.addons["cycles"].preferences.get_devices()
+            for device in bpy.context.preferences.addons["cycles"].preferences.devices:
+                device.use = True  # Enable all available GPUs
+            bpy.context.scene.cycles.device = "GPU"
+
+        bpy.context.scene.cycles.samples = SAMPLES
+        self.logger.info(
+            f"Set render engine to {bpy.context.scene.render.engine} and device type to " +
+            bpy.context.preferences.addons["cycles"].preferences.compute_device_type
+        )
+
     def set_display_number(self, number: int | str):
         """Iterates through all tubes' meshes and toggles filaments to match. Non digit character = Tube off"""
         if isinstance(number, int):
@@ -82,40 +104,6 @@ class Renderer:
 
         bpy.context.view_layer.update()
         return True
-
-    def _set_tube_digit(self, tube, digit: int):
-        self.logger.debug(f"Setting tube {tube.name} to display digit {digit}")
-
-        number_objs = [child for child in tube.children if child.name.startswith("number")]
-        if not number_objs:
-            self.logger.warning(f"No number objects found under {tube.name}")
-            return
-
-        number_obj = number_objs[0]
-
-        filaments = [child for child in number_obj.children
-                     if child.name.startswith("num") and not child.name.startswith("numDot")]
-
-        for filament in filaments:
-            try:
-                current_digit = int(filament.name.strip("num").split(".")[0])
-                mesh_children = [child for child in filament.children if child.type == "MESH"]
-
-                if not mesh_children:
-                    self.logger.debug(f"No mesh children found for {filament.name}")
-                    continue
-
-                mesh_obj = mesh_children[0]
-
-                if len(mesh_obj.material_slots) > 0:
-                    if current_digit == digit:
-                        mesh_obj.material_slots[0].material = self.on_mat
-                        self.logger.debug(f"Set {mesh_obj.name} (digit {current_digit}) to ON")
-                    else:
-                        mesh_obj.material_slots[0].material = self.off_mat
-                        self.logger.debug(f"Set {mesh_obj.name} (digit {current_digit}) to OFF")
-            except ValueError:
-                self.logger.debug(f"Could not parse digit from {filament.name}")
 
     def render_frame(self, frame=1, output_dir="./blender/output", filename="nixie_render"):
         Path(output_dir).mkdir(parents=True, exist_ok=True)
