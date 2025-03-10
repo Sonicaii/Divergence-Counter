@@ -1,7 +1,7 @@
 """Divergence View Renderer Server
 
 @author: Sonicaii
-@version: 0.3.0
+: 0.3.1
 
     TODO:
         - Caching system, Regenerate commonly requested numbers
@@ -12,13 +12,14 @@ import logging
 import os
 import random
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
 import bpy
 from dotenv import load_dotenv
 
-__version__ = "0.2.0"
+__version__ = "0.3.1"
 
 load_dotenv()
 logging.basicConfig(
@@ -45,10 +46,13 @@ SAMPLES = int(os.environ.get("RENDER_SAMPLES", 4096))
 DEVICE_TYPE = os.environ.get("RENDER_DEVICE_TYPE")
 TOTAL_FRAMES = int(os.environ.get("RENDER_TOTAL_FRAMES", 60))
 EXPORT_GIF_WIDTH = str(os.environ.get("EXPORT_GIF_WIDTH", 1500))
+BLEND_FILE_PATH = os.environ.get("BLEND_FILE_PATH", "./blender/tubes.blend")
+RENDER_OUTPUT_DIR = os.environ.get("RENDER_OUTPUT_DIR", "./blender/output")
+CACHE_DIR = os.environ.get("CACHE_DIR", "./cache")
 
 
 class Renderer:
-    def __init__(self, blend_file_path="blender/tubes.blend",
+    def __init__(self, blend_file_path=BLEND_FILE_PATH,
                  on_material_name="number_on_mt",
                  off_material_name="number_off_mt",
                  half_material_name="number_half_mt",
@@ -142,62 +146,63 @@ class Renderer:
         bpy.context.view_layer.update()
         return True
 
-    def render_frame(self, frame=1, output_dir="./blender/output", filename="nixie_render"):
-        Path(output_dir).mkdir(parents=True, exist_ok=True)
+    def render_frame(self, output: Path, frame=1):
+        output.parent.mkdir(parents=True, exist_ok=True)
 
         bpy.context.scene.frame_set(frame)
-        output_path = os.path.abspath(os.path.join(output_dir, filename))
-        bpy.context.scene.render.filepath = output_path
+        bpy.context.scene.render.filepath = str(output)
 
-        self.logger.info(f"Rendering frame to {output_path}")
+        self.logger.info(f"Rendering frame to {output}")
         self.logger.debug(f"Res: {bpy.context.scene.render.resolution_x}x{bpy.context.scene.render.resolution_y}")
 
         bpy.ops.render.render(write_still=True)
 
-        self.logger.info(f"Rendering complete: {output_path}")
-        return output_path
+        self.logger.info(f"Rendering complete: {output}")
+        return output
 
-    def animate_display(self, number: int, output_dir="./blender/output"):
+    def animate_display(self, number: int, output_dir=RENDER_OUTPUT_DIR):
         """Generates an animation with flickering tubes"""
         state = [self.on_mat] * DIGITS
         durations = [0] * DIGITS  # Number of frames tube is off
 
-        for frame in range(1, self.total_frames + 1):
+        with tempfile.TemporaryDirectory() as tmp_folder:
+            tmp_folder = Path(tmp_folder)
+            for frame in range(1, self.total_frames + 1):
 
-            # Apply flickering logic per tube
-            for i in range(DIGITS):
+                # Apply flickering logic per tube
+                for i in range(DIGITS):
 
-                if durations[i]:
-                    durations[i] -= 1
-                    state[i] = self.off_mat
-                    if durations[i] and random.random() < self.chances.SKIP_DIM:  # Next frame it will reactivate
-                        # Start to reactivate material with dim
-                        state[i] = self.half_mat
-                else:
-                    state[i] = self.on_mat
+                    if durations[i]:
+                        durations[i] -= 1
+                        state[i] = self.off_mat
+                        if durations[i] and random.random() < self.chances.SKIP_DIM:  # Next frame it will reactivate
+                            # Start to reactivate material with dim
+                            state[i] = self.half_mat
+                    else:
+                        state[i] = self.on_mat
 
-                neighbour_active = durations[(i - 1) % DIGITS] or durations[(i + 1) % DIGITS]
-                if random.random() < self.chances.START and not neighbour_active:
-                    if random.random() < self.chances.SKIP_DIM:
-                        state[i] = self.half_mat
-                    durations[i] = random.randint(self.chances.DURATION_MIN, self.chances.DURATION_MAX)
+                    neighbour_active = durations[(i - 1) % DIGITS] or durations[(i + 1) % DIGITS]
+                    if random.random() < self.chances.START and not neighbour_active:
+                        if random.random() < self.chances.SKIP_DIM:
+                            state[i] = self.half_mat
+                        durations[i] = random.randint(self.chances.DURATION_MIN, self.chances.DURATION_MAX)
 
-            self.set_display_number(number, state)
-            self.render_frame(frame, output_dir, f"{number}/{frame}.png")
+                self.set_display_number(number, state)
+                self.render_frame(tmp_folder / f"{frame}.png", frame)
 
-        self.logger.info("All frames rendered.")
+            self.logger.info("All frames rendered.")
 
-        command = [
-            "ffmpeg",
-            "-framerate", "60",
-            "-i", f"{number}/%d.png",
-            "-vf", f"scale={EXPORT_GIF_WIDTH}:-1:flags=lanczos",
-            "-r", "60",
-            "-y", f"{number}.gif"
-        ]
+            command = [
+                "ffmpeg",
+                "-framerate", "60",
+                "-i", str(tmp_folder / "%d.png"),
+                "-vf", f"scale={EXPORT_GIF_WIDTH}:-1:flags=lanczos",
+                "-r", "60",
+                "-y", f"{number}.gif"
+            ]
 
-        subprocess.run(command, cwd=output_dir, check=True)
-        self.logger.info(f"Exported as {number}.gif")
+            subprocess.run(command, cwd=output_dir, check=True)
+            self.logger.info(f"Exported as {number}.gif")
 
 
 if __name__ == "__main__":
