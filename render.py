@@ -1,25 +1,28 @@
 """Divergence View Renderer Server
 
 @author: Sonicaii
-: 0.3.1
+: 0.3.2
 
     TODO:
         - Caching system, Regenerate commonly requested numbers
-        - Automate deleting of png exports
         - Request server
 """
 import logging
 import os
 import random
+import shutil
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
 import bpy
 from dotenv import load_dotenv
 
-__version__ = "0.3.1"
+__version__ = "0.3.2"
+
+from flask import Flask, abort, send_file
 
 load_dotenv()
 logging.basicConfig(
@@ -33,22 +36,22 @@ logger = logging.getLogger("render")
 
 DIGITS = 8
 
-
-@dataclass
-class Chances:
-    START = 0.01
-    SKIP_DIM = 0.5
-    DURATION_MIN = 0
-    DURATION_MAX = 5
-
-
 SAMPLES = int(os.environ.get("RENDER_SAMPLES", 4096))
-DEVICE_TYPE = os.environ.get("RENDER_DEVICE_TYPE")
+DEVICE_TYPE = os.environ.get("RENDER_DEVICE_TYPE", "OPTIX")
 TOTAL_FRAMES = int(os.environ.get("RENDER_TOTAL_FRAMES", 60))
 EXPORT_GIF_WIDTH = str(os.environ.get("EXPORT_GIF_WIDTH", 1500))
 BLEND_FILE_PATH = os.environ.get("BLEND_FILE_PATH", "./blender/tubes.blend")
 RENDER_OUTPUT_DIR = os.environ.get("RENDER_OUTPUT_DIR", "./blender/output")
 CACHE_DIR = os.environ.get("CACHE_DIR", "./cache")
+
+
+@dataclass
+class Chances:
+    """Constants determining tube flickering animation probabilities and duration"""
+    START = 0.01
+    SKIP_DIM = 0.5
+    DURATION_MIN = 0
+    DURATION_MAX = 5
 
 
 class Renderer:
@@ -63,12 +66,14 @@ class Renderer:
         bpy.ops.wm.open_mainfile(filepath=blend_file_path)
         self.logger.info(f"Successfully loaded {blend_file_path}")
 
+        # Get material references
         self.on_mat = bpy.data.materials.get(on_material_name)
         self.off_mat = bpy.data.materials.get(off_material_name)
         self.half_mat = bpy.data.materials.get(half_material_name)
 
         self.total_frames = total_frames
 
+        # Update with any custom values
         self.chances = Chances()
         for k, v in ({} if chances is None else chances).items():
             self.chances.k = v
@@ -80,6 +85,7 @@ class Renderer:
             raise ValueError("Materials not found.")
 
         # Set up tubes mesh lookup, navigating through object structure
+        # _tubes is a 2D list of tubes (lists of length DIGITS) that holds 10 filaments (bpy.types.Object)
         self._tubes = []
         for tube in sorted([o for o in bpy.data.objects if o.name.startswith("display")], key=lambda o: o.name):
             number_objs = [child for child in tube.children if child.name.startswith("number")]
@@ -105,13 +111,25 @@ class Renderer:
         bpy.context.scene.render.engine = "CYCLES"
 
         # Enable GPU rendering
-        if DEVICE_TYPE is not None:
-            bpy.context.preferences.addons["cycles"].preferences.compute_device_type = DEVICE_TYPE
+        if DEVICE_TYPE:
+            cycles_prefs = bpy.context.preferences.addons["cycles"].preferences
+            cycles_prefs.compute_device_type = DEVICE_TYPE
+            cycles_prefs.get_devices()  # Refresh device list
 
-            bpy.context.preferences.addons["cycles"].preferences.get_devices()
-            for device in bpy.context.preferences.addons["cycles"].preferences.devices:
-                device.use = True  # Enable all available GPUs
+            active_devices = []
+
+            for device in cycles_prefs.devices:
+                if "CPU" not in device.name:  # Ignore CPU devices
+                    device.use = True
+                    active_devices.append(f"{device.name} ({device.type})")
+                else:
+                    device.use = False  # Ensure CPU is disabled
+
+            # Set rendering to use GPU
             bpy.context.scene.cycles.device = "GPU"
+
+            # Log active devices
+            self.logger.debug(f"Enabled GPU devices: {', '.join(active_devices)}")
 
         bpy.context.scene.cycles.samples = SAMPLES
         self.logger.info(
@@ -162,6 +180,7 @@ class Renderer:
 
     def animate_display(self, number: int, output_dir=RENDER_OUTPUT_DIR):
         """Generates an animation with flickering tubes"""
+        start = time.perf_counter()
         state = [self.on_mat] * DIGITS
         durations = [0] * DIGITS  # Number of frames tube is off
 
@@ -202,14 +221,38 @@ class Renderer:
             ]
 
             subprocess.run(command, cwd=output_dir, check=True)
-            self.logger.info(f"Exported as {number}.gif")
+            self.logger.info(
+                "Exported as %s.gif in %.2f seconds",
+                Path(output_dir) / str(number),
+                round(time.perf_counter() - start, 2)
+            )
+
+
+app = Flask(__name__)
+
+
+@app.route("/<int:number>")
+def serve_gif(number):
+    source_path = os.path.join(RENDER_OUTPUT_DIR, f"{number}.gif")
+    cache_path = os.path.join(CACHE_DIR, f"{number}.gif")
+
+    # Update cache with new version
+    if os.path.exists(source_path):
+        shutil.move(source_path, cache_path)
+
+    if not os.path.exists(cache_path):
+        abort(404, "GIF not found")
+
+    return send_file(cache_path, mimetype="image/gif")
 
 
 if __name__ == "__main__":
     try:
-        renderer = Renderer(total_frames=TOTAL_FRAMES)
+        app.renderer = Renderer(total_frames=TOTAL_FRAMES)
     except Exception as e:
         logger.error(f"Error loading blend file: {e}")
         exit(1)
 
-    renderer.animate_display(0)
+    # app.run(host="0.0.0.0", port=5000)
+
+    app.renderer.animate_display(0)
