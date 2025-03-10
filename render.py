@@ -1,28 +1,30 @@
 """Divergence View Renderer Server
 
 @author: Sonicaii
-: 0.3.2
-
-    TODO:
-        - Caching system, Regenerate commonly requested numbers
-        - Request server
+@version: 2.0.0
 """
+import asyncio
 import logging
 import os
 import random
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 
 import bpy
 from dotenv import load_dotenv
+from starlette.applications import Starlette
+from starlette.exceptions import HTTPException
+from starlette.responses import Response, JSONResponse
+from starlette.routing import Route
 
-__version__ = "0.3.2"
+__version__ = "2.0.0"
 
-from flask import Flask, abort, send_file
 
 load_dotenv()
 logging.basicConfig(
@@ -36,13 +38,94 @@ logger = logging.getLogger("render")
 
 DIGITS = 8
 
-SAMPLES = int(os.environ.get("RENDER_SAMPLES", 4096))
-DEVICE_TYPE = os.environ.get("RENDER_DEVICE_TYPE", "OPTIX")
-TOTAL_FRAMES = int(os.environ.get("RENDER_TOTAL_FRAMES", 60))
-EXPORT_GIF_WIDTH = str(os.environ.get("EXPORT_GIF_WIDTH", 1500))
-BLEND_FILE_PATH = os.environ.get("BLEND_FILE_PATH", "./blender/tubes.blend")
-RENDER_OUTPUT_DIR = os.environ.get("RENDER_OUTPUT_DIR", "./blender/output")
-CACHE_DIR = os.environ.get("CACHE_DIR", "./cache")
+SAMPLES = int(os.getenv("RENDER_SAMPLES", 4096))
+DEVICE_TYPE = os.getenv("RENDER_DEVICE_TYPE", "OPTIX")
+TOTAL_FRAMES = int(os.getenv("RENDER_TOTAL_FRAMES", 60))
+BLEND_FILE_PATH = os.getenv("BLEND_FILE_PATH", "./blender/tubes.blend")
+RENDER_OUTPUT_DIR = os.getenv("RENDER_OUTPUT_DIR", "./blender/output")
+CACHE_DIR = os.getenv("CACHE_DIR", "./cache")
+LOOKAHEAD = int(os.getenv("LOOKAHEAD", 5))
+
+# Blender settings
+bpy.context.scene.render.engine = "CYCLES"
+
+# Enable GPU rendering
+if DEVICE_TYPE:
+    cycles_prefs = bpy.context.preferences.addons["cycles"].preferences
+    cycles_prefs.compute_device_type = DEVICE_TYPE
+    cycles_prefs.get_devices()  # Refresh device list
+
+    active_devices = []
+
+    for device in cycles_prefs.devices:
+        if "CPU" not in device.name:  # Ignore CPU devices
+            device.use = True
+            active_devices.append(f"{device.name} ({device.type})")
+        else:
+            device.use = False  # Ensure CPU is disabled
+
+    # Set rendering to use GPU
+    bpy.context.scene.cycles.device = "GPU"
+
+    # Log active devices
+    logger.debug(f"Enabled GPU devices: {', '.join(active_devices)}")
+
+bpy.context.scene.cycles.samples = SAMPLES
+logger.info(
+    f"Set render engine to {bpy.context.scene.render.engine} and device type to " +
+    bpy.context.preferences.addons["cycles"].preferences.compute_device_type
+)
+
+
+class Queue:
+    def __init__(self):
+        self.data = OrderedDict()
+
+    def __call__(self, item):  # Append
+        if item not in self.data:
+            self.data[item] = None
+
+    def pop(self):
+        return self.data.popitem(last=False)[0] if self.data else None
+
+
+def get_tubes():
+    tubes = []
+    for tube in sorted([o for o in bpy.data.objects if o.name.startswith("display")], key=lambda o: o.name):
+        number_objs = [child for child in tube.children if child.name.startswith("number")]
+
+        if not number_objs:
+            raise ValueError(f"No number objects found under {tube.name}")
+
+        filaments = [child for child in number_objs[0].children
+                     if child.name.startswith("num") and not child.name.startswith("numDot")]
+
+        meshes = []
+        for filament in filaments:
+            mesh_children = [child for child in filament.children if child.type == "MESH"]
+
+            if not mesh_children:
+                raise ValueError(f"No mesh children found for {filament.name}")
+
+            meshes.append(mesh_children[0])
+
+        tubes.append(meshes)
+    return tubes
+
+
+def render_frame(output: Path, frame=1):
+    output.parent.mkdir(parents=True, exist_ok=True)
+
+    bpy.context.scene.frame_set(frame)
+    bpy.context.scene.render.filepath = str(output)
+
+    logger.info(f"Rendering frame to {output}")
+    logger.debug(f"Res: {bpy.context.scene.render.resolution_x}x{bpy.context.scene.render.resolution_y}")
+
+    bpy.ops.render.render(write_still=True)
+
+    logger.info(f"Rendering complete: {output}")
+    return output
 
 
 @dataclass
@@ -61,10 +144,8 @@ class Renderer:
                  half_material_name="number_half_mt",
                  total_frames=60,
                  chances=None):
-        self.logger = logger
-
         bpy.ops.wm.open_mainfile(filepath=blend_file_path)
-        self.logger.info(f"Successfully loaded {blend_file_path}")
+        logger.info(f"Successfully loaded {blend_file_path}")
 
         # Get material references
         self.on_mat = bpy.data.materials.get(on_material_name)
@@ -79,63 +160,47 @@ class Renderer:
             self.chances.k = v
 
         if not all([self.on_mat, self.off_mat, self.half_mat]):
-            self.logger.warning(f"Available materials:")
+            logger.warning(f"Available materials:")
             for mat in bpy.data.materials:
-                self.logger.warning(f"  - {mat.name}")
+                logger.warning(f"  - {mat.name}")
             raise ValueError("Materials not found.")
 
         # Set up tubes mesh lookup, navigating through object structure
         # _tubes is a 2D list of tubes (lists of length DIGITS) that holds 10 filaments (bpy.types.Object)
-        self._tubes = []
-        for tube in sorted([o for o in bpy.data.objects if o.name.startswith("display")], key=lambda o: o.name):
-            number_objs = [child for child in tube.children if child.name.startswith("number")]
+        self.tubes = get_tubes()
 
-            if not number_objs:
-                raise ValueError(f"No number objects found under {tube.name}")
+        self.queue = Queue()
+        self.rerender = Queue()
+        self.loop = asyncio.new_event_loop()
+        threading.Thread(target=self._start_loop, daemon=True).start()
 
-            filaments = [child for child in number_objs[0].children
-                         if child.name.startswith("num") and not child.name.startswith("numDot")]
+    def _start_loop(self):
+        """Runs the asyncio event loop in a background thread."""
+        asyncio.set_event_loop(self.loop)
+        self.loop.run_until_complete(self.process_queue())
 
-            meshes = []
-            for filament in filaments:
-                mesh_children = [child for child in filament.children if child.type == "MESH"]
+    def __call__(self, *numbers):
+        """Adds numbers to the render queue if not already enqueued and not already rendered before."""
+        for number in numbers:
+            cache_path = Path(CACHE_DIR) / f"{number}.webp"
+            render_path = Path(RENDER_OUTPUT_DIR) / f"{number}.webp"
 
-                if not mesh_children:
-                    raise ValueError(f"No mesh children found for {filament.name}")
+            if not (cache_path.exists() or render_path.exists()):
+                self.queue(number)
+            else:
+                logger.debug(f"Skipping {number}")
 
-                meshes.append(mesh_children[0])
-
-            self._tubes.append(meshes)
-
-        # Blender settings
-        bpy.context.scene.render.engine = "CYCLES"
-
-        # Enable GPU rendering
-        if DEVICE_TYPE:
-            cycles_prefs = bpy.context.preferences.addons["cycles"].preferences
-            cycles_prefs.compute_device_type = DEVICE_TYPE
-            cycles_prefs.get_devices()  # Refresh device list
-
-            active_devices = []
-
-            for device in cycles_prefs.devices:
-                if "CPU" not in device.name:  # Ignore CPU devices
-                    device.use = True
-                    active_devices.append(f"{device.name} ({device.type})")
-                else:
-                    device.use = False  # Ensure CPU is disabled
-
-            # Set rendering to use GPU
-            bpy.context.scene.cycles.device = "GPU"
-
-            # Log active devices
-            self.logger.debug(f"Enabled GPU devices: {', '.join(active_devices)}")
-
-        bpy.context.scene.cycles.samples = SAMPLES
-        self.logger.info(
-            f"Set render engine to {bpy.context.scene.render.engine} and device type to " +
-            bpy.context.preferences.addons["cycles"].preferences.compute_device_type
-        )
+    async def process_queue(self):
+        """Processes the render queue sequentially, ensuring no concurrency."""
+        while True:
+            try:
+                number = self.queue.pop()
+                if number is None:
+                    number = self.rerender.pop()
+                if number is not None:
+                    await asyncio.to_thread(self.animate_display, number, RENDER_OUTPUT_DIR)
+            except Exception as ex:
+                logger.error(ex)
 
     def set_display_number(self, number: int | str, state: list = None):
         """Iterates through all tubes' meshes and toggles filaments to match. Non digit character = Tube off"""
@@ -149,34 +214,20 @@ class Renderer:
         if len(state) != DIGITS:
             raise ValueError(f"{state} must be {DIGITS} long")
 
-        state_str = "".join([{self.on_mat: "█", self.half_mat: "░", self.off_mat: "_"}[s] for s in state])
-        self.logger.info(f"Setting tubes:  {number}")
-        self.logger.info(f"Setting states: {state_str}")
+        # state_str = "".join([{self.on_mat: "█", self.half_mat: "░", self.off_mat: "_"}[s] for s in state])
+        logger.info(f"Setting tubes:  {number}")
+        # logger.info(f"Setting states: {state_str}")
 
         for tube, digit in enumerate(number):
-            for i, filament in enumerate(self._tubes[tube]):
+            for i, filament in enumerate(self.tubes[tube]):
                 if str(i) == digit:
                     filament.material_slots[0].material = state[tube]
                 else:
                     filament.material_slots[0].material = self.off_mat
-                self.logger.debug(f"Set {filament.name} (digit {i}) to {filament.material_slots[0].material}")
+                logger.debug(f"Set {filament.name} (digit {i}) to {filament.material_slots[0].material}")
 
         bpy.context.view_layer.update()
         return True
-
-    def render_frame(self, output: Path, frame=1):
-        output.parent.mkdir(parents=True, exist_ok=True)
-
-        bpy.context.scene.frame_set(frame)
-        bpy.context.scene.render.filepath = str(output)
-
-        self.logger.info(f"Rendering frame to {output}")
-        self.logger.debug(f"Res: {bpy.context.scene.render.resolution_x}x{bpy.context.scene.render.resolution_y}")
-
-        bpy.ops.render.render(write_still=True)
-
-        self.logger.info(f"Rendering complete: {output}")
-        return output
 
     def animate_display(self, number: int, output_dir=RENDER_OUTPUT_DIR):
         """Generates an animation with flickering tubes"""
@@ -207,52 +258,72 @@ class Renderer:
                         durations[i] = random.randint(self.chances.DURATION_MIN, self.chances.DURATION_MAX)
 
                 self.set_display_number(number, state)
-                self.render_frame(tmp_folder / f"{frame}.png", frame)
+                render_frame(tmp_folder / f"{frame}.png", frame)
 
-            self.logger.info("All frames rendered.")
+            logger.info("All frames rendered.")
 
             command = [
                 "ffmpeg",
                 "-framerate", "60",
                 "-i", str(tmp_folder / "%d.png"),
-                "-vf", f"scale={EXPORT_GIF_WIDTH}:-1:flags=lanczos",
+                "-c:v", "libwebp",
+                "-lossless", "1",
+                "-loop", "0",  # Loop forever
+                "-preset", "default",
                 "-r", "60",
-                "-y", f"{number}.gif"
+                "-y", f"{number}.webp"
             ]
 
             subprocess.run(command, cwd=output_dir, check=True)
-            self.logger.info(
-                "Exported as %s.gif in %.2f seconds",
+            logger.info(
+                "Exported as %s.webp in %.2f seconds",
                 Path(output_dir) / str(number),
                 round(time.perf_counter() - start, 2)
             )
 
 
-app = Flask(__name__)
+async def serve(request):
+    number = int(request.path_params["number"])
+    """Serves file if cached, or triggers rendering if not."""
+    Path(RENDER_OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
+    Path(CACHE_DIR).mkdir(parents=True, exist_ok=True)
 
-
-@app.route("/<int:number>")
-def serve_gif(number):
-    source_path = os.path.join(RENDER_OUTPUT_DIR, f"{number}.gif")
-    cache_path = os.path.join(CACHE_DIR, f"{number}.gif")
+    filename = f"{number}.webp"
+    source_path = Path(RENDER_OUTPUT_DIR) / filename
+    cache_path = Path(CACHE_DIR) / filename
+    future_paths = (Path(RENDER_OUTPUT_DIR) / f"{number+LOOKAHEAD}.webp").exists() or \
+                   (Path(CACHE_DIR) / f"{number+LOOKAHEAD}.webp").exists()
 
     # Update cache with new version
-    if os.path.exists(source_path):
+    if source_path.exists():
         shutil.move(source_path, cache_path)
 
-    if not os.path.exists(cache_path):
-        abort(404, "GIF not found")
+    # First time encountering number, queue up extra numbers ahead
+    if not cache_path.exists() or not future_paths:
+        request.app.render(*range(number, number + LOOKAHEAD + 1))
+        logger.debug(f"Queued {number} to {number + LOOKAHEAD}")
+    else:
+        request.app.render.rerender(number)
+        logger.debug(f"Queued {number} for re-rendering")
 
-    return send_file(cache_path, mimetype="image/gif")
+    if not cache_path.exists():
+        raise HTTPException(status_code=404)
+
+    return Response(cache_path.read_bytes(), media_type="image/webp")
+
+
+async def get_queue(request):
+    return JSONResponse([*request.app.render.queue.data, *request.app.render.rerender.data])
+
+
+try:
+    app = Starlette(routes=[Route("/{number:int}", serve), Route("/", get_queue)])
+    app.render = Renderer(total_frames=TOTAL_FRAMES)
+except Exception as e:
+    logger.error(f"Error setting up renderer: {e}")
+    exit(1)
 
 
 if __name__ == "__main__":
-    try:
-        app.renderer = Renderer(total_frames=TOTAL_FRAMES)
-    except Exception as e:
-        logger.error(f"Error loading blend file: {e}")
-        exit(1)
-
-    # app.run(host="0.0.0.0", port=5000)
-
-    app.renderer.animate_display(0)
+    import uvicorn
+    uvicorn.run(app, host="127.0.0.1", port=8801)

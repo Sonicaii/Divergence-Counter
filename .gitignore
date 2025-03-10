@@ -179,3 +179,4 @@ cython_debug/
 
 *.blend[0-9]*
 /blender/output/
+/cache/

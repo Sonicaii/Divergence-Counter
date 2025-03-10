@@ -12,9 +12,9 @@ $ mkdir counter
 $ cd counter
 $ python3 -m venv venv
 $ source venv/bin/activate
-$ python3 -m pip install bpy flask gunicorn python-dotenv
+$ python3 -m pip install aiohttp bpy starlette python-dotenv uvicorn[standard]
 
-$ gunicorn --bind 0.0.0.0:8000 app:app
+$ uvicorn --host 0.0.0.0 --port 8800 app:app
 ```
 
 ### Renderer Server
@@ -30,7 +30,10 @@ RENDER_DEVICE_TYPE="OPTIX"  # Or "CUDA" etc. Leave blank for CPU
 RENDER_TOTAL_FRAMES=60
 EXPORT_GIF_WIDTH=1500
 ```
-
+```shell
+$ uvicorn --host 0.0.0.0 --port 8801 render:app
+```
+*Remember to set IP to `127.0.0.1` if using a reverse proxy.*
 ## Credits
 
 *   [Moe-Counter](https://github.com/journey-ad/Moe-Counter/)

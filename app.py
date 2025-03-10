@@ -1,29 +1,38 @@
 """Divergence View Counter
 
 @author: Sonicaii
-@version: 1.0.0
+@version: 2.0.0
 
-Inspiration and orignal code from https://github.com/journey-ad/Moe-Counter/
+Inspiration and original code from https://github.com/journey-ad/Moe-Counter/
 """
 
-from flask import Flask, Response
-import sqlite3
-import os
 import base64
-import mimetypes
+import os
+import sqlite3
+
+import aiohttp
+from dotenv import load_dotenv
+from starlette.applications import Starlette
+from starlette.responses import Response
+from starlette.routing import Route
+
+__version__ = "2.0.0"
 
 
-__version__ = "1.0.0"
-
-app = Flask(__name__)
+load_dotenv()
 
 tubes_path = os.path.join(os.path.dirname(__file__), "tubes")
 tubes = {}
+
+
+RENDER_SERVER = os.getenv("RENDER_SERVER", "http://127.0.0.1:8801")
+
 
 def convert_to_datauri(path):
     with open(path, "rb") as file:
         base64_data = base64.b64encode(file.read()).decode("utf-8")
     return f"data:webp;base64,{base64_data}"
+
 
 def get_count_image(count, length=7, border_radius=15):
     count_array = str(count).zfill(length)
@@ -48,8 +57,10 @@ def get_count_image(count, length=7, border_radius=15):
 </svg>
 '''
 
-@app.route('/<string:key>')
-def serve_count_image(key):
+
+async def serve_count_image(request):
+    key = request.path_params["key"]
+
     with sqlite3.connect("counter.db") as conn:
         c = conn.cursor()
         c.execute("SELECT count FROM counts WHERE key = ?", (key,))
@@ -66,6 +77,15 @@ def serve_count_image(key):
         count += 1
         c.execute("UPDATE counts SET count = ? WHERE key = ?", (count, key))
         c.close()
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(RENDER_SERVER + f"/{count}") as resp:
+                if resp.status == 200:
+                    data = await resp.read()
+                    return Response(data, media_type="image/webp")
+    except Exception as e:
+        print(e)
 
     svg = get_count_image(count)
     headers = {
@@ -94,6 +114,10 @@ with sqlite3.connect("counter.db") as conn:
     c.execute("CREATE TABLE IF NOT EXISTS counts (key TEXT PRIMARY KEY, count BIGINT NOT NULL)")
     c.close()
 
+app = Starlette(routes=[
+    Route("/{key:str}", serve_count_image)
+])
 
-if __name__ == '__main__':
-    app.run()
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="127.0.0.1", port=8800)
