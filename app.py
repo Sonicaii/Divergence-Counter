@@ -109,8 +109,8 @@ for img in os.listdir(tubes_path):
     name = os.path.splitext(img)[0]
 
     tubes[name] = {
-        "width": 88,
-        "height": 255,
+        "width": 180,
+        "height": 460,
         "data": convert_to_datauri(img_path)
     }
 
