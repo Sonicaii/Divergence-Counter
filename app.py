@@ -1,7 +1,7 @@
 """Divergence View Counter
 
 @author: Sonicaii
-@version: 2.0.0
+@version: 2.1.0
 
 Inspiration and original code from https://github.com/journey-ad/Moe-Counter/
 """
@@ -16,7 +16,7 @@ from starlette.applications import Starlette
 from starlette.responses import Response
 from starlette.routing import Route
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 
 
 load_dotenv()
@@ -49,7 +49,14 @@ def get_count_image(count, length=7, border_radius=15):
         y = max(y, height)
 
     return f'''<?xml version="1.0" encoding="UTF-8"?>
-<svg width="{x}" height="{y}" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" style="image-rendering: pixelated; border-radius: {border_radius}px;">
+<svg
+    width="{x}"
+    height="{y}"
+    version="1.1"
+    xmlns="http://www.w3.org/2000/svg"
+    xmlns:xlink="http://www.w3.org/1999/xlink"
+    style="image-rendering: pixelated; border-radius: {border_radius}px;"
+>
 <title>View Count</title>
 <g>
 {parts}
@@ -89,9 +96,9 @@ async def serve_count_image(request):
 
     svg = get_count_image(count)
     headers = {
-        'Content-Type': 'image/svg+xml',
-        'Cache-Control': 'max-age=0, no-cache, no-store, must-revalidate',
-        'Content-Length': str(len(svg.encode('utf-8')))
+        "Content-Type": "image/svg+xml",
+        "Cache-Control": "max-age=0, no-cache, no-store, must-revalidate",
+        "Content-Length": str(len(svg.encode("utf-8")))
     }
     return Response(svg, headers=headers)
 
@@ -100,11 +107,10 @@ async def serve_count_image(request):
 for img in os.listdir(tubes_path):
     img_path = os.path.join(tubes_path, img)
     name = os.path.splitext(img)[0]
-    width, height = 88, 255
 
     tubes[name] = {
-        "width": width,
-        "height": height,
+        "width": 88,
+        "height": 255,
         "data": convert_to_datauri(img_path)
     }
 
