@@ -38,7 +38,7 @@ logger = logging.getLogger("render")
 
 DIGITS = 8
 
-SAMPLES = int(os.getenv("RENDER_SAMPLES", 4096))
+SAMPLES = int(os.getenv("RENDER_SAMPLES", 1028))
 DEVICE_TYPE = os.getenv("RENDER_DEVICE_TYPE", "OPTIX")
 TOTAL_FRAMES = int(os.getenv("RENDER_TOTAL_FRAMES", 60))
 BLEND_FILE_PATH = os.getenv("BLEND_FILE_PATH", "./blender/tubes.blend")

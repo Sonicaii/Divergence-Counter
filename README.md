@@ -25,7 +25,7 @@ winget install Gyan.FFmpeg
 ```
 Set up .env and adjust for your system.
 ```dotenv
-RENDER_SAMPLES=4096
+RENDER_SAMPLES=1028
 RENDER_DEVICE_TYPE="OPTIX"  # Or "CUDA" etc. Leave blank for CPU 
 RENDER_TOTAL_FRAMES=60
 EXPORT_GIF_WIDTH=1500
