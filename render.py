@@ -40,7 +40,9 @@ DIGITS = 8
 
 SAMPLES = int(os.getenv("RENDER_SAMPLES", 1028))
 DEVICE_TYPE = os.getenv("RENDER_DEVICE_TYPE", "OPTIX")
-TOTAL_FRAMES = int(os.getenv("RENDER_TOTAL_FRAMES", 60))
+TOTAL_FRAMES = int(os.getenv("RENDER_TOTAL_FRAMES", 30))
+FPS = int(os.getenv("RENDER_FPS", 30))
+QUALITY = int(os.getenv("RENDER_QUALITY", 95))
 BLEND_FILE_PATH = os.getenv("BLEND_FILE_PATH", "./blender/tubes.blend")
 RENDER_OUTPUT_DIR = os.getenv("RENDER_OUTPUT_DIR", "./blender/output")
 CACHE_DIR = os.getenv("CACHE_DIR", "./cache")
@@ -147,7 +149,9 @@ class Renderer:
                  on_material_name="number_on_mt",
                  off_material_name="number_off_mt",
                  half_material_name="number_half_mt",
-                 total_frames=60,
+                 total_frames=30,
+                 fps=30,
+                 quality=95,
                  chances=None):
         bpy.ops.wm.open_mainfile(filepath=blend_file_path)
         setup_blender()
@@ -159,6 +163,8 @@ class Renderer:
         self.half_mat = bpy.data.materials.get(half_material_name)
 
         self.total_frames = total_frames
+        self.fps = fps
+        self.quality = quality
 
         # Update random generation chances with any custom values
         self.chances = Chances()
@@ -272,7 +278,7 @@ class Renderer:
 
         logger.info("All frames rendered.")
 
-        iio.imwrite(Path(output_dir) / f"{number}.webp", frames, fps=60, quality=100)
+        iio.imwrite(Path(output_dir) / f"{number}.webp", frames, fps=self.fps, quality=self.quality)
         logger.info(
             "Exported as %s.webp in %.2f seconds",
             Path(output_dir) / str(number),
@@ -320,7 +326,7 @@ async def get_queue(request):
 
 try:
     app = Starlette(routes=[Route("/{number:int}", serve), Route("/", get_queue)], on_shutdown=[stop])
-    app.render = Renderer(total_frames=TOTAL_FRAMES)
+    app.render = Renderer(total_frames=TOTAL_FRAMES, fps=FPS, quality=QUALITY)
 except Exception as e:
     logger.error(f"Error setting up renderer: {e}")
     exit(1)

@@ -27,8 +27,9 @@ Set up .env and adjust for your system.
 ```dotenv
 RENDER_SAMPLES=1028
 RENDER_DEVICE_TYPE="OPTIX"  # Or "CUDA" etc. Leave blank for CPU 
-RENDER_TOTAL_FRAMES=60
-EXPORT_GIF_WIDTH=1500
+RENDER_TOTAL_FRAMES=30
+RENDER_FPS=30
+RENDER_QUALITY=95
 ```
 ```shell
 $ uvicorn --host 0.0.0.0 --port 8801 render:app
