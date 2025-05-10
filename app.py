@@ -89,8 +89,11 @@ async def serve_count_image(request):
         async with aiohttp.ClientSession() as session:
             async with session.get(RENDER_SERVER + f"/{count}") as resp:
                 if resp.status == 200:
-                    data = await resp.read()
-                    return Response(data, media_type="image/webp")
+                    return Response(
+                        await resp.read(),
+                        media_type="image/webp",
+                        headers={"Cache-Control": "max-age=0, no-cache, no-store, must-revalidate"}
+                    )
     except Exception as e:
         print(e)
 
